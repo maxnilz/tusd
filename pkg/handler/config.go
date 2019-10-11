@@ -45,6 +45,8 @@ type Config struct {
 	// Otherwise the HTTP request will be aborted. This can be used to implement
 	// validation of upload metadata etc.
 	PreUploadCreateCallback func(hook HookEvent) error
+
+	ExtractIDFromPath func(url string) (string, error)
 }
 
 func (config *Config) validate() error {

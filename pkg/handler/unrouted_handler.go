@@ -149,6 +149,8 @@ type UnroutedHandler struct {
 	CreatedUploads chan HookEvent
 	// Metrics provides numbers of the usage for this handler.
 	Metrics Metrics
+
+	extractIDFromPath func(url string) (string, error)
 }
 
 // NewUnroutedHandler creates a new handler without routing using the given
@@ -172,6 +174,9 @@ func NewUnroutedHandler(config Config) (*UnroutedHandler, error) {
 		extensions += ",creation-defer-length"
 	}
 
+	if config.ExtractIDFromPath == nil {
+		config.ExtractIDFromPath = extractIDFromPath
+	}
 	handler := &UnroutedHandler{
 		config:            config,
 		composer:          config.StoreComposer,
@@ -184,6 +189,7 @@ func NewUnroutedHandler(config Config) (*UnroutedHandler, error) {
 		logger:            config.Logger,
 		extensions:        extensions,
 		Metrics:           newMetrics(),
+		extractIDFromPath: config.ExtractIDFromPath,
 	}
 
 	return handler, nil
@@ -274,7 +280,7 @@ func (handler *UnroutedHandler) Middleware(h http.Handler) http.Handler {
 // PostFile creates a new file upload using the datastore after validating the
 // length and parsing the metadata.
 func (handler *UnroutedHandler) PostFile(w http.ResponseWriter, r *http.Request) {
-	ctx := context.Background()
+	ctx := r.Context()
 
 	// Check for presence of application/offset+octet-stream. If another content
 	// type is defined, it will be ignored and treated as none was set because
@@ -289,7 +295,7 @@ func (handler *UnroutedHandler) PostFile(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Parse Upload-Concat header
-	isPartial, isFinal, partialUploadIDs, err := parseConcat(concatHeader)
+	isPartial, isFinal, partialUploadIDs, err := parseConcat(handler, concatHeader)
 	if err != nil {
 		handler.sendError(w, r, err)
 		return
@@ -414,9 +420,9 @@ func (handler *UnroutedHandler) PostFile(w http.ResponseWriter, r *http.Request)
 
 // HeadFile returns the length and offset for the HEAD request
 func (handler *UnroutedHandler) HeadFile(w http.ResponseWriter, r *http.Request) {
-	ctx := context.Background()
+	ctx := r.Context()
 
-	id, err := extractIDFromPath(r.URL.Path)
+	id, err := handler.extractIDFromPath(r.URL.Path)
 	if err != nil {
 		handler.sendError(w, r, err)
 		return
@@ -478,7 +484,7 @@ func (handler *UnroutedHandler) HeadFile(w http.ResponseWriter, r *http.Request)
 // PatchFile adds a chunk to an upload. This operation is only allowed
 // if enough space in the upload is left.
 func (handler *UnroutedHandler) PatchFile(w http.ResponseWriter, r *http.Request) {
-	ctx := context.Background()
+	ctx := r.Context()
 
 	// Check for presence of application/offset+octet-stream
 	if r.Header.Get("Content-Type") != "application/offset+octet-stream" {
@@ -493,7 +499,7 @@ func (handler *UnroutedHandler) PatchFile(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	id, err := extractIDFromPath(r.URL.Path)
+	id, err := handler.extractIDFromPath(r.URL.Path)
 	if err != nil {
 		handler.sendError(w, r, err)
 		return
@@ -693,9 +699,9 @@ func (handler *UnroutedHandler) finishUploadIfComplete(ctx context.Context, uplo
 // GetFile handles requests to download a file using a GET request. This is not
 // part of the specification.
 func (handler *UnroutedHandler) GetFile(w http.ResponseWriter, r *http.Request) {
-	ctx := context.Background()
+	ctx := r.Context()
 
-	id, err := extractIDFromPath(r.URL.Path)
+	id, err := handler.extractIDFromPath(r.URL.Path)
 	if err != nil {
 		handler.sendError(w, r, err)
 		return
@@ -814,7 +820,7 @@ func filterContentType(info FileInfo) (contentType string, contentDisposition st
 
 // DelFile terminates an upload permanently.
 func (handler *UnroutedHandler) DelFile(w http.ResponseWriter, r *http.Request) {
-	ctx := context.Background()
+	ctx := r.Context()
 
 	// Abort the request handling if the required interface is not implemented
 	if !handler.composer.UsesTerminater {
@@ -822,7 +828,7 @@ func (handler *UnroutedHandler) DelFile(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	id, err := extractIDFromPath(r.URL.Path)
+	id, err := handler.extractIDFromPath(r.URL.Path)
 	if err != nil {
 		handler.sendError(w, r, err)
 		return
@@ -1150,7 +1156,11 @@ func SerializeMetadataHeader(meta map[string]string) string {
 // Parse the Upload-Concat header, e.g.
 // Upload-Concat: partial
 // Upload-Concat: final;http://tus.io/files/a /files/b/
-func parseConcat(header string) (isPartial bool, isFinal bool, partialUploads []string, err error) {
+func parseConcat(h *UnroutedHandler, header string) (isPartial bool, isFinal bool, partialUploads []string, err error) {
+	if h == nil || h.extractIDFromPath == nil {
+		err = NewHTTPError(errors.New("invalid input parameter"), http.StatusInternalServerError)
+		return
+	}
 	if len(header) == 0 {
 		return
 	}
@@ -1171,7 +1181,7 @@ func parseConcat(header string) (isPartial bool, isFinal bool, partialUploads []
 				continue
 			}
 
-			id, extractErr := extractIDFromPath(value)
+			id, extractErr := h.extractIDFromPath(value)
 			if extractErr != nil {
 				err = extractErr
 				return
